@@ -1,0 +1,49 @@
+pipeline {
+  agent any
+  environment {
+    AWS_REGION     = 'eu-central-1'
+    ECR_REPO       = credentials('ecr-repo-url')     // Secret text: full repo URL, e.g., x.dkr.ecr.../konecta-devops-app
+    EKS_CLUSTER    = credentials('eks-cluster-name') // Secret text: cluster name
+    IMAGE_TAG      = "${env.BUILD_NUMBER}"
+    KUBE_NAMESPACE = "${env.BRANCH_NAME == 'main' ? 'prod' : 'test'}"
+  }
+  triggers { githubPush() }
+
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Login to ECR') {
+      steps {
+        sh '''
+          aws --version || (sudo apt-get update && sudo apt-get install -y awscli)
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO
+        '''
+      }
+    }
+
+    stage('Build & Push Image') {
+      steps {
+        sh '''
+          cd application
+          docker build -t $ECR_REPO:$IMAGE_TAG .
+          docker push $ECR_REPO:$IMAGE_TAG
+        '''
+      }
+    }
+
+    stage('Deploy to EKS') {
+      steps {
+        sh '''
+          aws eks update-kubeconfig --region $AWS_REGION --name $(cat <<< "$EKS_CLUSTER")
+          # Apply manifests first (create if not exist)
+          kubectl apply -f k8s/$KUBE_NAMESPACE/
+          # Then roll the image on the deployment
+          kubectl -n $KUBE_NAMESPACE set image deployment/counter-app counter-app=$ECR_REPO:$IMAGE_TAG --record
+        '''
+      }
+    }
+  }
+}
+
