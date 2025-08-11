@@ -1,0 +1,53 @@
+---
+- hosts: jenkins
+  become: yes
+  tasks:
+    - name: Base packages
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - git
+          - openjdk-17-jre
+          - docker.io
+        state: present
+        update_cache: yes
+
+    - name: Add Jenkins repo key
+      apt_key:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins repo
+      apt_repository:
+        repo: "deb https://pkg.jenkins.io/debian-stable binary/"
+        state: present
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+        update_cache: yes
+
+    - name: Install kubectl (v1.30 line)
+      shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key \
+          | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /" \
+          > /etc/apt/sources.list.d/kubernetes.list
+        apt-get update -y && apt-get install -y kubectl
+
+    - name: Add ubuntu and jenkins to docker group
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop: [ubuntu, jenkins]
+
+    - name: Restart Jenkins
+      service:
+        name: jenkins
+        state: restarted
+        enabled: yes
+
