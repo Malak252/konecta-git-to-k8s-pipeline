@@ -1,13 +1,13 @@
-# --- Terraform ---
-**/.terraform/*
-!.terraform.lock.hcl
+# Terraform
+.terraform/
+.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
-crash.log
-override.tf
-override.tf.json
-*_override.tf
-*_override.tf.json
-# Optional
+*.tfvars
+*.tfplan
+*.tfplan.*
+.terraform.tfstate.lock.info
+
+# Local .terraformrc files
 .terraformrc
 terraform.rc
