@@ -1,0 +1,73 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION   = 'eu-north-1'                           
+    ECR_REPO     = credentials('ecr-repo-url')            // 3338....dkr.ecr.eu-north-1.amazonaws.com/konecta-devops-app  *changed*
+    EKS_CLUSTER  = credentials('eks-cluster-name')        // cluster name: konecta-devops-eks
+    IMAGE_TAG    = "${env.BUILD_NUMBER}"
+  }
+
+  triggers { githubPush() }
+
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('AWS Login') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'aws-creds',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
+          sh '''
+            set -e
+            aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+            aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+            aws configure set default.region "$AWS_REGION"
+
+            REGISTRY=$(echo "$ECR_REPO" | cut -d'/' -f1)
+            aws ecr get-login-password --region "$AWS_REGION" \
+              | docker login --username AWS --password-stdin "$REGISTRY"
+          '''
+        }
+      }
+    }
+
+    stage('Build & Push') {
+      steps {
+        sh '''
+          set -e
+          cd application
+          docker build -t "$ECR_REPO:$IMAGE_TAG" .
+          docker push "$ECR_REPO:$IMAGE_TAG"
+        '''
+      }
+    }
+
+    stage('Deploy to EKS') {
+      steps {
+        sh '''
+          set -e
+          # Determine namespace from branch (main -> prod, else test)
+          if [ "${BRANCH_NAME:-}" = "main" ]; then
+            KUBE_NAMESPACE=prod
+          else
+            KUBE_NAMESPACE=test
+          fi
+          echo "Namespace: $KUBE_NAMESPACE"
+
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$(cat <<< "$EKS_CLUSTER")"
+
+          # Apply (create/update) objects
+          kubectl apply -f "k8s/$KUBE_NAMESPACE/"
+
+          # Roll deployment image
+          kubectl -n "$KUBE_NAMESPACE" set image deployment/counter-app \
+            counter-app="$ECR_REPO:$IMAGE_TAG" --record
+        '''
+      }
+    }
+  }
+}
+
