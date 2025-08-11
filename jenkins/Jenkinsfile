@@ -3,7 +3,6 @@ pipeline {
     
     environment {
         ECR_REPO = credentials('ECR_REPO')
-        EKS_CLUSTER = credentials('EKS_CLUSTER')
         AWS_REGION = 'eu-north-1'
     }
     
@@ -51,18 +50,20 @@ pipeline {
         
         stage('Deploy to EKS') {
             steps {
-                sh '''
-                    set -e
-                    # Update kubeconfig
-                    aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
-                    
-                    # Replace image tag in K8s manifests and apply
-                    sed -i "s|IMAGE_TAG|${BUILD_NUMBER}|g" k8s/deployment.yaml
-                    kubectl apply -f k8s/
-                    
-                    # Wait for deployment to complete
-                    kubectl rollout status deployment/hello-app
-                '''
+                withCredentials([string(credentialsId: 'EKS_CLUSTER', variable: 'EKS_CLUSTER_NAME')]) {
+                    sh '''
+                        set -e
+                        # Update kubeconfig
+                        aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+                        
+                        # Replace image tag in K8s manifests and apply
+                        sed -i "s|IMAGE_TAG|${BUILD_NUMBER}|g" k8s/deployment.yaml
+                        kubectl apply -f k8s/
+                        
+                        # Wait for deployment to complete
+                        kubectl rollout status deployment/hello-app
+                    '''
+                }
             }
         }
     }
