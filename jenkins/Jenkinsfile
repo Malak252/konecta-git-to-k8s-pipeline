@@ -69,7 +69,7 @@ pipeline {
     
     post {
         always {
-            node {
+            node('') {
                 // Clean up Docker images to save space
                 sh 'docker system prune -f'
             }
