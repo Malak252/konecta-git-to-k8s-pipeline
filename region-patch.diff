@@ -1,0 +1,161 @@
+*** Begin Region Patch ***
+# Purpose: switch AWS region across Jenkins + Terraform + .env, and add helper script.
+# Usage:
+#   git apply region-patch.diff
+#   bash scripts/set-region.sh eu-central-1 <ACCOUNT_ID> <REPO_NAME>
+#   # or edit files manually replacing <AWS_REGION_TARGET>
+
+diff --git a/jenkins/Jenkinsfile b/jenkins/Jenkinsfile
+index 2222222..3333333 100644
+--- a/jenkins/Jenkinsfile
++++ b/jenkins/Jenkinsfile
+@@ -1,11 +1,22 @@
+ pipeline {
+   agent any
+-  environment {
+-    AWS_REGION = 'eu-north-1'
+-  }
++  parameters {
++    string(name: 'AWS_REGION', defaultValue: '<AWS_REGION_TARGET>', description: 'Target AWS region for build/deploy')
++  }
++  environment { }
+   options { timestamps() }
+   stages {
+     stage('Checkout') {
+       steps { checkout scm }
+     }
+     stage('Prepare Vars') {
+       steps {
+         script {
++          // Allow overriding region from parameter while keeping a sane default
++          env.AWS_REGION = params.AWS_REGION?.trim() ? params.AWS_REGION.trim() : (env.AWS_REGION ?: 'eu-north-1')
++
+           GIT_SHA = sh(returnStdout: true, script: "git rev-parse --short HEAD").trim()
+           DATE = sh(returnStdout: true, script: "date +%Y%m%d").trim()
+           BRANCH = env.BRANCH_NAME ?: sh(returnStdout: true, script: "git rev-parse --abbrev-ref HEAD").trim()
+           NAMESPACE = (BRANCH == 'main') ? 'prod' : 'test'
+           TAG = (BRANCH == 'main') ? "v-${DATE}-${GIT_SHA}" : "dev-${GIT_SHA}"
+           currentBuild.displayName = "${BRANCH} #${BUILD_NUMBER} ${TAG}"
+         }
+       }
+     }
++    stage('Validate Region & Repo') {
++      steps {
++        withCredentials([string(credentialsId: 'ECR_REPO', variable: 'ECR_REPO')]) {
++          sh '''
++            set -euo pipefail
++            echo "Using AWS_REGION=${AWS_REGION}"
++            REG_REGION=$(echo "$ECR_REPO" | sed -n 's#.*ecr\\.\\(.*\\)\\.amazonaws\\.com.*#\\1#p' || true)
++            if [ -n "$REG_REGION" ] && [ "$REG_REGION" != "$AWS_REGION" ]; then
++              echo "WARNING: ECR repo region ($REG_REGION) != AWS_REGION ($AWS_REGION). Push will likely fail." >&2
++            fi
++          '''
++        }
++      }
++    }
+     stage('Login AWS & ECR') {
+       steps {
+         withCredentials([
+           string(credentialsId: 'AWS_ACCESS_KEY_ID', variable: 'AWS_ACCESS_KEY_ID'),
+           string(credentialsId: 'AWS_SECRET_ACCESS_KEY', variable: 'AWS_SECRET_ACCESS_KEY'),
+           string(credentialsId: 'ECR_REPO', variable: 'ECR_REPO')
+         ]) {
+           sh '''
+             set -euo pipefail
+             aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+             aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+-            aws configure set default.region "$AWS_REGION"
++            aws configure set default.region "${AWS_REGION}"
+             REGISTRY=$(echo "$ECR_REPO" | cut -d'/' -f1)
+-            aws ecr describe-repositories --repository-names "$(echo "$ECR_REPO" | cut -d'/' -f2-)" >/dev/null 2>&1 || \
+-              aws ecr create-repository --repository-name "$(echo "$ECR_REPO" | cut -d'/' -f2-)"
+-            aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
++            aws ecr describe-repositories --repository-names "$(echo "$ECR_REPO" | cut -d'/' -f2-)" --region "${AWS_REGION}" >/dev/null 2>&1 || \
++              aws ecr create-repository --repository-name "$(echo "$ECR_REPO" | cut -d'/' -f2-)" --region "${AWS_REGION}"
++            aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "$REGISTRY"
+           '''
+         }
+       }
+     }
+@@ -70,6 +81,7 @@ pipeline {
+     }
+   }
+   post {
+     always {
+       sh 'docker system prune -f || true'
+     }
+   }
+ }
+diff --git a/infra/terraform/backend.hcl b/infra/terraform/backend.hcl
+index 2222222..3333333 100644
+--- a/infra/terraform/backend.hcl
++++ b/infra/terraform/backend.hcl
+@@ -1,5 +1,5 @@
+ bucket         = "konecta-devops-tfstate-5a1d1752"
+ key            = "state/eks-jenkins.tfstate"
+-region         = "eu-north-1"
++region         = "<AWS_REGION_TARGET>"
+ dynamodb_table = "konecta-tf-locks"
+ encrypt        = true
+diff --git a/.env.example b/.env.example
+index 2222222..3333333 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,7 +1,7 @@
+ # App
+ ENVIRONMENT=test
+ REDIS_HOST=redis
+ # CI/CD
+-AWS_REGION=eu-north-1
++AWS_REGION=<AWS_REGION_TARGET>
+ ECR_REPO=<ACCOUNT_ID>.dkr.ecr.eu-north-1.amazonaws.com/<REPO_NAME>
+ KUBECONFIG=/home/jenkins/.kube/config
+diff --git a/scripts/set-region.sh b/scripts/set-region.sh
+new file mode 100755
+--- /dev/null
++++ b/scripts/set-region.sh
+@@ -0,0 +1,84 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++if [ "${1:-}" = "" ]; then
++  echo "Usage: $0 <region> [account_id] [repo_name]"
++  echo "Example: $0 eu-central-1 123456789012 counter-app"
++  exit 1
++fi
++
++REGION="$1"
++ACCOUNT="${2:-}"
++REPO="${3:-}"
++
++echo "Setting region to: ${REGION}"
++
++# 1) Terraform backend region
++if [ -f infra/terraform/backend.hcl ]; then
++  sed -i "s#region *= *\"[a-z0-9-]*\"#region = \"${REGION}\"#g" infra/terraform/backend.hcl
++fi
++
++# 2) .env.example
++if [ -f .env.example ]; then
++  sed -i "s#^AWS_REGION=.*#AWS_REGION=${REGION}#g" .env.example
++fi
++
++# 3) Jenkinsfile parameter default
++if [ -f jenkins/Jenkinsfile ]; then
++  sed -i "s#defaultValue: '[^']*', description: 'Target AWS region for build/deploy'#defaultValue: '${REGION}', description: 'Target AWS region for build/deploy'#g" jenkins/Jenkinsfile
++fi
++
++# 4) Optionally rewrite ECR_REPO in manifests if account & repo are provided
++if [ -n "$ACCOUNT" ] && [ -n "$REPO" ]; then
++  NEW="\\1${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${REPO}"
++  for f in k8s/*/deployment.yaml; do
++    [ -f "$f" ] || continue
++    sed -i -E "s#([\" ])([0-9]{12})\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[^\": ]+#\\1${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${REPO}#g" "$f" || true
++    sed -i -E "s#([\" ])<ACCOUNT_ID>\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/<REPO_NAME>#\\1${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${REPO}#g" "$f" || true
++  done
++  sed -i "s#^ECR_REPO=.*#ECR_REPO=${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${REPO}#g" .env.example || true
++fi
++
++echo "Done. Review git diff and commit the changes."
+*** End Region Patch ***
+

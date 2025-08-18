@@ -1,0 +1,672 @@
+*** Begin Patch Pack ***
+# Apply with: git apply patch.diff
+
+diff --git a/hello.py b/hello.py
+index 1111111..2222222 100644
+--- a/hello.py
++++ b/hello.py
+@@ -1,999 +1,180 @@
+-import redis
+-from redis.exceptions import ConnectionError
+-import tornado.ioloop
+-import tornado.web
+-
+-import os
+-from sys import exit
+-
+-
+-try:
+-
+-    redis_host = os.getenv("REDIS_HOST", "localhost")
+-    r = redis.Redis(
+-        host=redis_host,
+-        port=6379,
+-        db=0
+-...
+-        tornado.web.Application.__init__(self, handlers, **settings)
+-
+-
+-if __name__ == "__main__":
+-    app = Application()
+-    app.listen(port)
+-    print("App running: http://localhost:8000")
+-    tornado.ioloop.IOLoop.current().start()
++import os
++import redis
++from redis.exceptions import ConnectionError
++import tornado.ioloop
++import tornado.web
++
++PORT = int(os.getenv("PORT", "8000"))
++ENVIRONMENT = os.getenv("ENVIRONMENT", "test")  # "test" or "prod"
++REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
++
++class MainHandler(tornado.web.RequestHandler):
++    def get(self):
++        counter = 0
++        try:
++            r = redis.Redis(host=REDIS_HOST, port=6379, db=0, socket_connect_timeout=1)
++            counter = r.incr("counter")
++        except ConnectionError:
++            counter = -1  # indicates Redis not reachable
++        self.render("index.html", dict={"environment": ENVIRONMENT, "counter": counter})
++
++class HealthHandler(tornado.web.RequestHandler):
++    def get(self):
++        self.write("ok")
++
++class Application(tornado.web.Application):
++    def __init__(self):
++        handlers = [
++            (r"/", MainHandler),
++            (r"/healthz", HealthHandler),
++            (r"/readyz", HealthHandler),
++        ]
++        settings = dict(
++            template_path=os.path.join(os.path.dirname(__file__), "templates"),
++            static_path=os.path.join(os.path.dirname(__file__), "static"),
++        )
++        super().__init__(handlers, **settings)
++
++if __name__ == "__main__":
++    app = Application()
++    app.listen(PORT)
++    print(f"App running: http://0.0.0.0:{PORT} ({ENVIRONMENT})")
++    tornado.ioloop.IOLoop.current().start()
+
+diff --git a/requirements.txt b/requirements.txt
+index 1111111..2222222 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,2 +1,2 @@
+-redis
+-tornado==5.1.1
++redis==4.6.0
++tornado==5.1.1
+
+diff --git a/Dockerfile b/Dockerfile
+index 1111111..2222222 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,22 +1,33 @@
+- # Using official python runtime base image
+-FROM  python:3.9-slim
+-# add curl for healthcheck
+-RUN apt-get update \
+-    && pip install --upgrade pip \
+-    && apt-get install -y --no-install-recommends \
+-    curl \
+-    && rm -rf /var/lib/apt/lists/* 
+-
+-
+-WORKDIR /usr/src/app
+-
+-COPY requirements.txt /usr/src/app/ 
+-
+-COPY . .
+-
+-
+-
+-RUN pip install --no-cache-dir -r requirements.txt
+- 
+-EXPOSE 8000
+-
+-CMD ["python3", "hello.py"]
++FROM python:3.9-slim AS base
++ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
++RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
++WORKDIR /app
++COPY requirements.txt .
++RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
++COPY . .
++
++# Use non-root
++RUN useradd -m appuser && chown -R appuser:appuser /app
++USER appuser
++EXPOSE 8000
++ENV PORT=8000
++HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD curl -fsS http://localhost:8000/healthz || exit 1
++CMD ["python3", "hello.py"]
+
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,14 @@
++.git
++.github
++**/__pycache__/
++*.pyc
++.venv
++venv
++.pytest_cache
++infra/terraform/.terraform/
++infra/terraform/*.tfstate*
++infra/ansible/*.retry
++test/
++README.md
++LICENSE
++monitoring/
+
+diff --git a/static/css/style.css b/static/css/style.css
+index 1111111..2222222 100644
+--- a/static/css/style.css
++++ b/static/css/style.css
+@@ -1,16 +1,20 @@
+ span.counter {
+   color: #1625c2;
+ }
+ 
+ span.highlight {
+   background-color: #3f51b5;
+   color: white;
+   padding: 3px;
+   border-radius: 2px;
+ }
+ 
+-span.highlight#DEV {
++span.highlight#DEV,
++span.highlight#test {
+   background-color: #4caf50;
+   color: white;
+ }
+ 
+-span.highlight#PROD {
++span.highlight#PROD,
++span.highlight#prod {
+   background-color: #f44336;
+   color: white;
+ }
+
+diff --git a/infra/terraform/backend.hcl b/infra/terraform/backend.hcl
+index 1111111..2222222 100644
+--- a/infra/terraform/backend.hcl
++++ b/infra/terraform/backend.hcl
+@@ -1,5 +1,5 @@
+ bucket         = "konecta-devops-tfstate-5a1d1752"
+ key            = "state/eks-jenkins.tfstate"
+-region         = "eu-central-1"
++region         = "eu-north-1"
+ dynamodb_table = "konecta-tf-locks"
+ encrypt        = true
+
+diff --git a/infra/ansible/jenkins.yml b/infra/ansible/jenkins.yml
+index 1111111..2222222 100644
+--- a/infra/ansible/jenkins.yml
++++ b/infra/ansible/jenkins.yml
+@@ -1,40 +1,150 @@
+ ---
+ - hosts: jenkins
+   become: yes
+   tasks:
+-    - name: Base packages
+-      apt:
+-        name:
+-          - ca-certificates
+-          - curl
+-...
++    - name: Base packages
++      apt:
++        name:
++          - ca-certificates
++          - curl
++          - git
++          - openjdk-17-jre
++          - docker.io
++          - unzip
++        state: present
++        update_cache: yes
++
++    - name: Add Jenkins repo key
++      apt_key:
++        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
++        state: present
++
++    - name: Add Jenkins repo
++      apt_repository:
++        repo: "deb https://pkg.jenkins.io/debian-stable binary/"
++        state: present
++
++    - name: Install Jenkins
++      apt:
++        name: jenkins
++        state: present
++        update_cache: yes
++
++    - name: Install kubectl
++      shell: |
++        set -euo pipefail
++        curl -fsSLo /usr/local/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl
++        chmod +x /usr/local/bin/kubectl
++      args:
++        creates: /usr/local/bin/kubectl
++
++    - name: Install AWS CLI v2
++      shell: |
++        set -euo pipefail
++        tmp=$(mktemp -d)
++        cd "$tmp"
++        curl -fsSLO "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
++        unzip awscli-exe-linux-x86_64.zip
++        ./aws/install
++      args:
++        creates: /usr/local/bin/aws
++
++    - name: Add ubuntu and jenkins to docker group
++      user:
++        name: "{{ item }}"
++        groups: docker
++        append: yes
++      loop: [ubuntu, jenkins]
++
++    - name: Ensure Jenkins is started and enabled
++      service:
++        name: jenkins
++        state: started
++        enabled: yes
+
+diff --git a/infra/ansible/inventory.ini b/infra/ansible/inventory.ini
+index 1111111..2222222 100644
+--- a/infra/ansible/inventory.ini
++++ b/infra/ansible/inventory.ini
+@@ -1,4 +1,4 @@
+ [jenkins]
+-
+-jenkins ansible_host=13.48.57.170 ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/jenkins.pem
++jenkins ansible_host=<JENKINS_PUBLIC_IP> ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/jenkins.pem
++# Tip: feed this from Terraform output or use dynamic inventory.
+
+diff --git a/k8s/test/deployment.yaml b/k8s/test/deployment.yaml
+index 1111111..2222222 100644
+--- a/k8s/test/deployment.yaml
++++ b/k8s/test/deployment.yaml
+@@ -1,5 +1,45 @@
+-apiVersion: apps/v1
+-kind: Deployment
+-metadata:
+-  name: counter-app
+-...
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: counter-app
++  namespace: test
++  labels: { app: counter-app }
++spec:
++  replicas: 1
++  selector:
++    matchLabels: { app: counter-app }
++  template:
++    metadata:
++      labels: { app: counter-app }
++    spec:
++      containers:
++        - name: app
++          image: <ACCOUNT_ID>.dkr.ecr.eu-north-1.amazonaws.com/<REPO_NAME>:dev
++          imagePullPolicy: IfNotPresent
++          ports: [{ containerPort: 8000 }]
++          env:
++            - name: ENVIRONMENT
++              valueFrom:
++                configMapKeyRef: { name: counter-config, key: ENVIRONMENT }
++            - name: REDIS_HOST
++              valueFrom:
++                configMapKeyRef: { name: counter-config, key: REDIS_HOST }
++          readinessProbe:
++            httpGet: { path: /readyz, port: 8000 }
++            initialDelaySeconds: 5
++            periodSeconds: 5
++          livenessProbe:
++            httpGet: { path: /healthz, port: 8000 }
++            initialDelaySeconds: 10
++            periodSeconds: 10
++          resources:
++            requests: { cpu: "50m", memory: "64Mi" }
++            limits: { cpu: "250m", memory: "256Mi" }
+
+diff --git a/k8s/test/service.yaml b/k8s/test/service.yaml
+index 1111111..2222222 100644
+--- a/k8s/test/service.yaml
++++ b/k8s/test/service.yaml
+@@ -6,7 +6,7 @@
+ spec:
+   type: LoadBalancer
+   selector:
+     app: counter-app
+   ports:
+-    - port: 80
+-      targetPort: 5000
++    - port: 80
++      targetPort: 8000
+
+diff --git a/k8s/test/redis-service.yaml b/k8s/test/redis-service.yaml
+index 1111111..2222222 100644
+--- a/k8s/test/redis-service.yaml
++++ b/k8s/test/redis-service.yaml
+@@ -1,10 +1,9 @@
+ apiVersion: v1
+ kind: Service
+ metadata:
+   name: redis
+   namespace: test
+ spec:
+-  clusterIP: None
++  type: ClusterIP
+   selector:
+     app: redis
+   ports:
+     - port: 6379
+       targetPort: 6379
+
+diff --git a/k8s/prod/namespace.yaml b/k8s/prod/namespace.yaml
+new file mode 100644
+--- /dev/null
++++ b/k8s/prod/namespace.yaml
+@@ -0,0 +1,4 @@
++apiVersion: v1
++kind: Namespace
++metadata:
++  name: prod
+
+diff --git a/k8s/prod/config.yaml b/k8s/prod/config.yaml
+index 1111111..2222222 100644
+--- a/k8s/prod/config.yaml
++++ b/k8s/prod/config.yaml
+@@ -1,9 +1,9 @@
+ apiVersion: v1
+ kind: ConfigMap
+ metadata:
+   name: counter-config
+   namespace: prod
+ data:
+-  ENVIRONMENT: "prod"
+-  REDIS_HOST: "redis"
++  ENVIRONMENT: "prod"
++  REDIS_HOST: "redis"
+
+diff --git a/k8s/prod/deployment.yaml b/k8s/prod/deployment.yaml
+new file mode 100644
+--- /dev/null
++++ b/k8s/prod/deployment.yaml
+@@ -0,0 +1,41 @@
++apiVersion: apps/v1
++kind: Deployment
++metadata:
++  name: counter-app
++  namespace: prod
++  labels: { app: counter-app }
++spec:
++  replicas: 2
++  selector:
++    matchLabels: { app: counter-app }
++  template:
++    metadata:
++      labels: { app: counter-app }
++    spec:
++      containers:
++        - name: app
++          image: <ACCOUNT_ID>.dkr.ecr.eu-north-1.amazonaws.com/<REPO_NAME>:latest
++          imagePullPolicy: IfNotPresent
++          ports: [{ containerPort: 8000 }]
++          env:
++            - name: ENVIRONMENT
++              valueFrom:
++                configMapKeyRef: { name: counter-config, key: ENVIRONMENT }
++            - name: REDIS_HOST
++              valueFrom:
++                configMapKeyRef: { name: counter-config, key: REDIS_HOST }
++          readinessProbe:
++            httpGet: { path: /readyz, port: 8000 }
++            initialDelaySeconds: 5
++          livenessProbe:
++            httpGet: { path: /healthz, port: 8000 }
++            initialDelaySeconds: 10
++          resources:
++            requests: { cpu: "100m", memory: "128Mi" }
++            limits: { cpu: "500m", memory: "512Mi" }
+
+diff --git a/k8s/prod/service.yaml b/k8s/prod/service.yaml
+new file mode 100644
+--- /dev/null
++++ b/k8s/prod/service.yaml
+@@ -0,0 +1,13 @@
++apiVersion: v1
++kind: Service
++metadata:
++  name: counter-app
++  namespace: prod
++spec:
++  type: LoadBalancer
++  selector:
++    app: counter-app
++  ports:
++    - port: 80
++      targetPort: 8000
++      protocol: TCP
+
+diff --git a/k8s/test/ingress.yaml b/k8s/test/ingress.yaml
+new file mode 100644
+--- /dev/null
++++ b/k8s/test/ingress.yaml
+@@ -0,0 +1,20 @@
++apiVersion: networking.k8s.io/v1
++kind: Ingress
++metadata:
++  name: counter-test
++  namespace: test
++  annotations:
++    kubernetes.io/ingress.class: nginx
++spec:
++  rules:
++    - host: test.<YOUR_DOMAIN>
++      http:
++        paths:
++          - path: /
++            pathType: Prefix
++            backend:
++              service:
++                name: counter-app
++                port:
++                  number: 80
+
+diff --git a/k8s/prod/ingress.yaml b/k8s/prod/ingress.yaml
+new file mode 100644
+--- /dev/null
++++ b/k8s/prod/ingress.yaml
+@@ -0,0 +1,20 @@
++apiVersion: networking.k8s.io/v1
++kind: Ingress
++metadata:
++  name: counter-prod
++  namespace: prod
++  annotations:
++    kubernetes.io/ingress.class: nginx
++spec:
++  rules:
++    - host: prod.<YOUR_DOMAIN>
++      http:
++        paths:
++          - path: /
++            pathType: Prefix
++            backend:
++              service:
++                name: counter-app
++                port:
++                  number: 80
+
+diff --git a/.pre-commit-config.yaml b/.pre-commit-config.yaml
+new file mode 100644
+--- /dev/null
++++ b/.pre-commit-config.yaml
+@@ -0,0 +1,33 @@
++repos:
++  - repo: https://github.com/pre-commit/pre-commit-hooks
++    rev: v4.6.0
++    hooks:
++      - id: trailing-whitespace
++      - id: end-of-file-fixer
++      - id: check-yaml
++      - id: check-added-large-files
++  - repo: https://github.com/bridgecrewio/checkov
++    rev: 3.2.369
++    hooks:
++      - id: checkov
++        args: ["-d", "."]
++  - repo: local
++    hooks:
++      - id: terraform-fmt
++        name: terraform fmt
++        entry: terraform fmt -recursive
++        language: system
++        pass_filenames: false
+
+diff --git a/Makefile b/Makefile
+new file mode 100644
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,76 @@
++APP_NAME=counter-app
++IMAGE_REPO?=<ACCOUNT_ID>.dkr.ecr.eu-north-1.amazonaws.com/<REPO_NAME>
++TAG?=$(shell date +%Y%m%d)-$(shell git rev-parse --short HEAD)
++
++.PHONY: setup lint test build scan deploy-test deploy-prod destroy
++
++setup:
++\tpython3 -m pip install -r requirements.txt
++
++lint:
++\tpip-audit || true
++
++test:
++\tpython3 -m unittest -v
++
++build:
++\tdocker build -t $(IMAGE_REPO):$(TAG) .
++
++scan:
++\ttrivy image $(IMAGE_REPO):$(TAG) || true
++
++deploy-test:
++\tkubectl apply -f k8s/test
++\tkubectl -n test set image deploy/$(APP_NAME) app=$(IMAGE_REPO):$(TAG) --record
++
++deploy-prod:
++\tkubectl apply -f k8s/prod
++\tkubectl -n prod set image deploy/$(APP_NAME) app=$(IMAGE_REPO):$(TAG) --record
++
++destroy:
++\tkubectl delete -f k8s/test || true
++\tkubectl delete -f k8s/prod || true
+
+diff --git a/.env.example b/.env.example
+new file mode 100644
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,7 @@
++# App
++ENVIRONMENT=test
++REDIS_HOST=redis
++# CI/CD
++AWS_REGION=eu-north-1
++ECR_REPO=<ACCOUNT_ID>.dkr.ecr.eu-north-1.amazonaws.com/<REPO_NAME>
++KUBECONFIG=/home/jenkins/.kube/config
+
+diff --git a/jenkins/Jenkinsfile b/jenkins/Jenkinsfile
+index 1111111..2222222 100644
+--- a/jenkins/Jenkinsfile
++++ b/jenkins/Jenkinsfile
+@@ -1,200 +1,220 @@
++pipeline {
++  agent any
++  environment {
++    AWS_REGION = 'eu-north-1'
++  }
++  options { timestamps() }
++  stages {
++    stage('Checkout') {
++      steps { checkout scm }
++    }
++    stage('Prepare Vars') {
++      steps {
++        script {
++          GIT_SHA = sh(returnStdout: true, script: "git rev-parse --short HEAD").trim()
++          DATE = sh(returnStdout: true, script: "date +%Y%m%d").trim()
++          BRANCH = env.BRANCH_NAME ?: sh(returnStdout: true, script: "git rev-parse --abbrev-ref HEAD").trim()
++          NAMESPACE = (BRANCH == 'main') ? 'prod' : 'test'
++          TAG = (BRANCH == 'main') ? "v-${DATE}-${GIT_SHA}" : "dev-${GIT_SHA}"
++          currentBuild.displayName = "${BRANCH} #${BUILD_NUMBER} ${TAG}"
++        }
++      }
++    }
++    stage('Login AWS & ECR') {
++      steps {
++        withCredentials([
++          string(credentialsId: 'AWS_ACCESS_KEY_ID', variable: 'AWS_ACCESS_KEY_ID'),
++          string(credentialsId: 'AWS_SECRET_ACCESS_KEY', variable: 'AWS_SECRET_ACCESS_KEY'),
++          string(credentialsId: 'ECR_REPO', variable: 'ECR_REPO')
++        ]) {
++          sh '''
++            set -euo pipefail
++            aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
++            aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
++            aws configure set default.region "$AWS_REGION"
++            REGISTRY=$(echo "$ECR_REPO" | cut -d'/' -f1)
++            aws ecr describe-repositories --repository-names "$(echo "$ECR_REPO" | cut -d'/' -f2-)" >/dev/null 2>&1 || \
++              aws ecr create-repository --repository-name "$(echo "$ECR_REPO" | cut -d'/' -f2-)"
++            aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
++          '''
++        }
++      }
++    }
++    stage('Build & Tag') {
++      steps {
++        withCredentials([string(credentialsId: 'ECR_REPO', variable: 'ECR_REPO')]) {
++          sh '''
++            set -euo pipefail
++            docker build -t "$ECR_REPO:${TAG}" .
++            docker tag "$ECR_REPO:${TAG}" "$ECR_REPO:latest"
++          '''
++        }
++      }
++    }
++    stage('SBOM') {
++      steps {
++        sh '''
++          set -euo pipefail
++          which docker || true
++          docker sbom "$ECR_REPO:${TAG}" || true
++        '''
++      }
++    }
++    stage('Push') {
++      steps {
++        withCredentials([string(credentialsId: 'ECR_REPO', variable: 'ECR_REPO')]) {
++          sh '''
++            set -euo pipefail
++            docker push "$ECR_REPO:${TAG}"
++            if [ "$BRANCH" = "main" ]; then docker push "$ECR_REPO:latest"; fi
++          '''
++        }
++      }
++    }
++    stage('Deploy') {
++      steps {
++        withCredentials([file(credentialsId: 'KUBECONFIG', variable: 'KUBECONFIG')]) {
++          sh '''
++            set -euo pipefail
++            kubectl apply -f k8s/${NAMESPACE}
++            kubectl -n "${NAMESPACE}" set image deploy/counter-app app="$ECR_REPO:${TAG}" --record
++            kubectl -n "${NAMESPACE}" rollout status deploy/counter-app
++          '''
++        }
++      }
++    }
++  }
++  post {
++    always {
++      sh 'docker system prune -f || true'
++    }
++  }
++}
+*** End Patch Pack ***
+
